@@ -23,20 +23,25 @@ module Kafka
 
     def initialize(name, subscription, zookeeper: [], chroot: '', max_wait_ms: 500, logger: nil)
       @name, @subscription, @max_wait_ms = name, subscription, max_wait_ms
-      @cluster = Kazoo::Cluster.new(zookeeper, chroot: chroot)
-
       @logger = logger || Logger.new($stdout)
+
+      @cluster = Kazoo::Cluster.new(zookeeper, chroot: chroot)
+      @consumergroup = Kazoo::Consumergroup.new(@cluster, name)
+      @consumergroup.create unless @consumergroup.exists?
+
+      @instance = @consumergroup.instantiate
+      @instance.register(topics)
 
       @queue, @dead = Queue.new, false
       start_consuming
     end
 
     def topics
-      @topics ||= Array(@cluster.topics[subscription]) # todo: multiple topics
+      @topics ||= Array(@cluster.topics[subscription])
     end
 
     def partitions
-      topics.map(&:partitions).flatten
+      topics.flat_map(&:partitions).sort_by { |partition| [partition.leader.id, partition.topic.name, partition.id] }
     end
 
     def interrupt
@@ -45,6 +50,7 @@ module Kafka
         @partition_consumers.each(&:interrupt)
         @partition_consumers.each(&:wait)
         @dead = true
+        @instance.deregister
         logger.info "All partition consumers were terminated"
       end
     end
@@ -68,10 +74,28 @@ module Kafka
       retry
     end
 
+    def self.distribute_partitions(instances, partitions)
+      return {} if instances.empty?
+      partitions_per_instance = partitions.length.to_f / instances.length.to_f
+
+      partitions.group_by.with_index do |partition, index|
+        instance_index = index.fdiv(partitions_per_instance).floor
+        instances[instance_index]
+      end
+    end
+
     private
 
     def start_consuming
-      @partition_consumers = partitions.map do |partition|
+      running_instances = @consumergroup.instances.sort_by(&:id)
+      logger.info "#{running_instances.length} instances have been registered: #{running_instances.map(&:id).join(', ')}."
+
+      distributed_partitions = self.class.distribute_partitions(running_instances, partitions)
+      my_partitions = distributed_partitions[@instance]
+
+      logger.info "Claiming #{my_partitions.length} out of #{partitions.length} partitions."
+
+      @partition_consumers = my_partitions.map do |partition|
         PartitionConsumer.new(self, partition, max_wait_ms: max_wait_ms)
       end
     end
