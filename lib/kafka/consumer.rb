@@ -8,28 +8,26 @@ require "kafka/consumer/message"
 
 module Kafka
   class Consumer
-
     BACKPRESSURE_MESSAGE_LIMIT = 1000
-    RETRY_CLAIM_PARTITION_INTERVAL = 1.0
 
     include Enumerable
 
-    attr_reader :name, :subscription, :queue, :cluster, :max_wait_ms, :logger, :instance
+    attr_reader :name, :subscription, :queue, :cluster, :max_wait_ms, :logger, :instance, :group
 
     def initialize(name, subscription, zookeeper: [], chroot: '', max_wait_ms: 500, logger: nil)
       @name, @subscription, @max_wait_ms = name, subscription, max_wait_ms
       @logger = logger || Logger.new($stdout)
 
       @cluster = Kazoo::Cluster.new(zookeeper, chroot: chroot)
-      @consumergroup = Kazoo::Consumergroup.new(@cluster, name)
-      @consumergroup.create unless @consumergroup.exists?
+      @group = Kazoo::Consumergroup.new(@cluster, name)
+      @group.create unless @group.exists?
 
-      @instance = @consumergroup.instantiate
+      @instance = @group.instantiate
       @instance.register(topics)
 
       @queue = Queue.new
       @consumer_manager = mananage_partition_consumers
-      @consumer_manager.abort_on_exception = true
+      @consumer_manager[:offsets] = {}
     end
 
     def topics
@@ -45,19 +43,13 @@ module Kafka
 
     def interrupt
       Thread.new do
-        logger.info "Interrupting partition consumers..."
+        Thread.current.abort_on_exception = true
+
+        logger.info "Stopping partition consumers..."
         @consumer_manager[:interrupted] = true
 
-        # Make sure to wake up the manager thread, and join it
+        # Make sure to wake up the manager thread, so it can shut down
         continue
-        @consumer_manager.join
-
-        # Deregister the instance. This should trigger
-        # a rebalance in all the remaining instances.
-        @instance.deregister
-        logger.info "Consumer group instance was deregistered"
-
-        cluster.close
       end
     end
 
@@ -66,7 +58,12 @@ module Kafka
     end
 
     def stop
-      interrupt.join
+      interrupt
+      wait
+    end
+
+    def wait
+      @consumer_manager.join
     end
 
     def dead?
@@ -75,14 +72,12 @@ module Kafka
 
     def each(&block)
       until dead? && queue.empty?
-        yield queue.pop(true)
+        message = queue.pop(true)
+        block.call(message)
 
-        if queue.length < BACKPRESSURE_MESSAGE_LIMIT / 2
-          # Resume any partition consumers that have been suspended due to backpressure
-          @partition_consumers.each(&:continue)
-        end
+        @consumer_manager[:offsets][message.topic]
       end
-      logger.debug "All events where consumed"
+      logger.debug "All events in the queue were consumed."
 
     rescue ThreadError
       retry
@@ -106,8 +101,14 @@ module Kafka
 
     def mananage_partition_consumers
       Thread.new do
+        Thread.current.abort_on_exception = true
+
+        logger.info "Registered for #{group.name} as #{instance.id}"
+
+        @partition_consumers = {}
+
         until interrupted?
-          running_instances = @consumergroup.instances.sort_by(&:id)
+          running_instances, change = group.watch_instances { continue }
           logger.info "#{running_instances.length} instances have been registered: #{running_instances.map(&:id).join(', ')}."
 
           # Distribute the partitions over the running instances. Afterwards, we can see
@@ -119,22 +120,43 @@ module Kafka
 
           logger.info "Claiming #{my_partitions.length} out of #{partitions.length} partitions."
 
-          @partition_consumers = my_partitions.map do |partition|
-            PartitionConsumer.new(self, partition, max_wait_ms: max_wait_ms)
+          partition_to_stop  = @partition_consumers.keys - my_partitions
+          partition_to_start = my_partitions - @partition_consumers.keys
+
+          if partition_to_stop.length > 0
+            logger.info "Stopping #{partition_to_stop.length} out of #{@partition_consumers.length} partition consumers."
+
+            partition_to_stop.each do |partition|
+              partition_consumer = @partition_consumers.delete(partition)
+              partition_consumer.stop
+            end
           end
 
-          @consumergroup.watch_instances { continue }
+          if partition_to_start.length > 0
+            logger.info "Starting #{partition_to_start.length} new partition consumers."
 
-          logger.info "Suspended consumer manager thread."
-          Thread.stop
-          logger.info "Consumer manager thread is resuming..."
+            partition_to_start.each do |partition|
+              @partition_consumers[partition] = PartitionConsumer.new(self, partition, max_wait_ms: max_wait_ms)
+            end
+          end
 
-          logger.info "Stopping partition consumers..."
-          @partition_consumers.each(&:interrupt)
-          @partition_consumers.each(&:wait)
+          unless change.completed?
+            logger.debug "Suspended consumer manager thread."
+            Thread.stop
+            logger.debug "Consumer manager thread woke up..."
+          end
         end
 
-        logger.debug "Consumer interrupted, manager will shut down."
+        logger.debug "Consumer interrupted."
+
+        @partition_consumers.each_value(&:stop)
+
+        # Deregister the instance. This should trigger
+        # a rebalance in all the remaining instances.
+        @instance.deregister
+        logger.debug "Consumer group instance #{instance.id} was deregistered"
+
+        cluster.close
       end
     end
 
@@ -142,14 +164,18 @@ module Kafka
       attr_reader :consumer, :partition
 
       def wait
-        consumer.logger.info "Waiting for #{partition.topic.name}/#{partition.id} to terminate..."
         @thread.join if @thread.alive?
-        consumer.logger.info "#{partition.topic.name}/#{partition.id} was terminated!"
       end
 
       def interrupt
         @thread[:interrupted] = true
         continue
+      end
+
+      def stop
+        interrupt
+        wait
+        consumer.logger.info "Consumer for #{partition.topic.name}/#{partition.id} stopped."
       end
 
       def continue
@@ -163,49 +189,56 @@ module Kafka
       def initialize(consumer, partition, max_wait_ms: 100)
         @consumer, @partition = consumer, partition
         @thread = Thread.new do
+          Thread.current.abort_on_exception = true
 
           # First, we will try to claim the partition in Zookeeper to ensure there's
           # only one consumer for it simultaneously.
           consumer.logger.info "Claiming partition #{partition.topic.name}/#{partition.id}..."
           begin
-            consumer.instance.claim_partition(partition)
+            other_instance, change = consumer.group.watch_partition_claim(partition) { continue }
+            if other_instance.nil?
+              consumer.instance.claim_partition(partition)
+            elsif other_instance == consumer.instance
+              raise "Already claimed this partition myself. That should not happen"
+            else
+              consumer.logger.warn "Partition #{partition.topic.name}/#{partition.id} is still claimed by instance #{other_instance.id}. Waiting for the claim to be released..."
+              Thread.stop unless change.completed?
+              raise Kazoo::PartitionAlreadyClaimed
+            end
           rescue Kazoo::PartitionAlreadyClaimed
-            consumer.logger.warn "Partition #{partition.topic.name}/#{partition.id} is still claimed by another instance. Trying again in 1 second..."
-            sleep(RETRY_CLAIM_PARTITION_INTERVAL)
-            return if interrupted?
-            retry # abort eventually?
+            retry unless interrupted?
           end
 
-          # Now we have successfully claimed the partition, we can start a consumer for it.
-          consumer.logger.info "Starting consumer for #{partition.topic.name}/#{partition.id}..."
-          pc = Poseidon::PartitionConsumer.consumer_for_partition(
-                @name,
-                consumer.cluster.brokers.values.map(&:addr),
-                partition.topic.name,
-                partition.id,
-                -1 # TODO: resume.
-              )
+          unless interrupted?
+            # Now we have successfully claimed the partition, we can start a consumer for it.
+            consumer.logger.info "Starting consumer for #{partition.topic.name}/#{partition.id}..."
+            pc = Poseidon::PartitionConsumer.consumer_for_partition(
+                  @name,
+                  consumer.cluster.brokers.values.map(&:addr),
+                  partition.topic.name,
+                  partition.id,
+                  -1 # TODO: resume.
+                )
 
-          until interrupted?
-            if consumer.queue.length > BACKPRESSURE_MESSAGE_LIMIT
-              consumer.logger.debug "Too much backlog in event queue, pausing #{partition.topic.name}/#{partition.id} for a bit"
-              Thread.stop
-              consumer.logger.debug "Resuming #{partition.topic.name}/#{partition.id} now backlog has cleared..."
+            until interrupted?
+              if consumer.queue.length > BACKPRESSURE_MESSAGE_LIMIT
+                consumer.logger.debug "Too much backlog in event queue, pausing #{partition.topic.name}/#{partition.id} for a bit"
+                sleep(1.0)
+              end
+
+              messages = pc.fetch(max_wait_ms: max_wait_ms)
+              messages.each do |message|
+                consumer.queue << Message.new(partition.topic.name, partition.id, message)
+              end
             end
 
-            messages = pc.fetch(max_wait_ms: max_wait_ms)
-            messages.each do |message|
-              consumer.queue << Message.new(partition.topic.name, partition.id, message)
-            end
+            consumer.logger.debug "Stopping consumer for #{partition.topic.name}/#{partition.id}..."
+            pc.close
+
+            consumer.instance.release_partition(partition)
+            consumer.logger.debug "Released claim for partition #{partition.topic.name}/#{partition.id}!"
           end
-
-          consumer.logger.info "Terminating consumer for #{partition.topic.name}/#{partition.id}..."
-          pc.close
-
-          consumer.instance.release_partition(partition)
-          consumer.logger.info "Released claim for partition #{partition.topic.name}/#{partition.id}!"
         end
-        @thread.abort_on_exception = true
       end
     end
   end
