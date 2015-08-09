@@ -3,8 +3,9 @@ require "poseidon"
 require "thread"
 require "logger"
 
-require "kafka/consumer/version"
 require "kafka/consumer/message"
+require "kafka/consumer/partition_consumer"
+require "kafka/consumer/version"
 
 module Kafka
   class Consumer
@@ -12,10 +13,14 @@ module Kafka
 
     include Enumerable
 
-    attr_reader :name, :subscription, :queue, :cluster, :max_wait_ms, :logger, :instance, :group
+    attr_reader :subscription,
+        :cluster, :group, :instance,
+        :max_wait_ms, :initial_offset,
+        :logger
 
-    def initialize(name, subscription, zookeeper: [], chroot: '', max_wait_ms: 500, logger: nil)
-      @name, @subscription, @max_wait_ms = name, subscription, max_wait_ms
+    def initialize(name, subscription, zookeeper: [], chroot: '', max_wait_ms: 200, initial_offset: :latest_offset, logger: nil)
+      @name, @subscription = name, subscription
+      @max_wait_ms, @initial_offset = max_wait_ms, initial_offset
       @logger = logger || Logger.new($stdout)
 
       @cluster = Kazoo::Cluster.new(zookeeper, chroot: chroot)
@@ -24,10 +29,14 @@ module Kafka
 
       @instance = @group.instantiate
       @instance.register(topics)
+    end
 
-      @queue = Queue.new
-      @consumer_manager = mananage_partition_consumers
-      @consumer_manager[:offsets] = {}
+    def name
+      group.name
+    end
+
+    def id
+      instance.id
     end
 
     def topics
@@ -63,7 +72,7 @@ module Kafka
     end
 
     def wait
-      @consumer_manager.join
+      @consumer_manager.join if @consumer_manager.alive?
     end
 
     def dead?
@@ -71,16 +80,17 @@ module Kafka
     end
 
     def each(&block)
-      until dead? && queue.empty?
-        message = queue.pop(true)
-        block.call(message)
+      mutex = Mutex.new
 
-        @consumer_manager[:offsets][message.topic]
+      handler = lambda do |message|
+        mutex.synchronize do
+          block.call(message)
+        end
       end
-      logger.debug "All events in the queue were consumed."
 
-    rescue ThreadError
-      retry
+      @consumer_manager = manage_partition_consumers(handler)
+
+      wait
     end
 
     def self.distribute_partitions(instances, partitions)
@@ -99,7 +109,7 @@ module Kafka
       @consumer_manager.run if @consumer_manager.status == 'sleep'
     end
 
-    def mananage_partition_consumers
+    def manage_partition_consumers(handler)
       Thread.new do
         Thread.current.abort_on_exception = true
 
@@ -136,7 +146,8 @@ module Kafka
             logger.info "Starting #{partition_to_start.length} new partition consumers."
 
             partition_to_start.each do |partition|
-              @partition_consumers[partition] = PartitionConsumer.new(self, partition, max_wait_ms: max_wait_ms)
+              @partition_consumers[partition] = PartitionConsumer.new(self, partition,
+                  max_wait_ms: max_wait_ms, initial_offset: initial_offset, handler: handler)
             end
           end
 
@@ -157,88 +168,6 @@ module Kafka
         logger.debug "Consumer group instance #{instance.id} was deregistered"
 
         cluster.close
-      end
-    end
-
-    class PartitionConsumer
-      attr_reader :consumer, :partition
-
-      def wait
-        @thread.join if @thread.alive?
-      end
-
-      def interrupt
-        @thread[:interrupted] = true
-        continue
-      end
-
-      def stop
-        interrupt
-        wait
-        consumer.logger.info "Consumer for #{partition.topic.name}/#{partition.id} stopped."
-      end
-
-      def continue
-        @thread.run if @thread.status == 'sleep'
-      end
-
-      def interrupted?
-        @thread[:interrupted]
-      end
-
-      def initialize(consumer, partition, max_wait_ms: 100)
-        @consumer, @partition = consumer, partition
-        @thread = Thread.new do
-          Thread.current.abort_on_exception = true
-
-          # First, we will try to claim the partition in Zookeeper to ensure there's
-          # only one consumer for it simultaneously.
-          consumer.logger.info "Claiming partition #{partition.topic.name}/#{partition.id}..."
-          begin
-            other_instance, change = consumer.group.watch_partition_claim(partition) { continue }
-            if other_instance.nil?
-              consumer.instance.claim_partition(partition)
-            elsif other_instance == consumer.instance
-              raise "Already claimed this partition myself. That should not happen"
-            else
-              consumer.logger.warn "Partition #{partition.topic.name}/#{partition.id} is still claimed by instance #{other_instance.id}. Waiting for the claim to be released..."
-              Thread.stop unless change.completed?
-              raise Kazoo::PartitionAlreadyClaimed
-            end
-          rescue Kazoo::PartitionAlreadyClaimed
-            retry unless interrupted?
-          end
-
-          unless interrupted?
-            # Now we have successfully claimed the partition, we can start a consumer for it.
-            consumer.logger.info "Starting consumer for #{partition.topic.name}/#{partition.id}..."
-            pc = Poseidon::PartitionConsumer.consumer_for_partition(
-                  @name,
-                  consumer.cluster.brokers.values.map(&:addr),
-                  partition.topic.name,
-                  partition.id,
-                  -1 # TODO: resume.
-                )
-
-            until interrupted?
-              if consumer.queue.length > BACKPRESSURE_MESSAGE_LIMIT
-                consumer.logger.debug "Too much backlog in event queue, pausing #{partition.topic.name}/#{partition.id} for a bit"
-                sleep(1.0)
-              end
-
-              messages = pc.fetch(max_wait_ms: max_wait_ms)
-              messages.each do |message|
-                consumer.queue << Message.new(partition.topic.name, partition.id, message)
-              end
-            end
-
-            consumer.logger.debug "Stopping consumer for #{partition.topic.name}/#{partition.id}..."
-            pc.close
-
-            consumer.instance.release_partition(partition)
-            consumer.logger.debug "Released claim for partition #{partition.topic.name}/#{partition.id}!"
-          end
-        end
       end
     end
   end
