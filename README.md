@@ -17,7 +17,7 @@ It's your responsibility to deal with this if that is a problem for you, e.g. by
 
 ## Usage
 
-First, add `kafka-consumer` to your **Gemfile**, and run `bundle install.
+First, add `kafka-consumer` to your **Gemfile**, and run `bundle install`.
 If your messages are snappy-compressed, add the `snappy` gem as well.
 
 ``` ruby
