@@ -11,7 +11,7 @@ instance at a time. It uses Zookeeper watches to be notified of new consumer ins
 online or going offline, which will trigger a redistribition of all the partitions that are consumed.
 
 Periodically, it will commit the last processed offset of every partition to Zookeeper. Whenever a
-new consumer starts, it will resume consumingevery partition at the last committed offset. This implements
+new consumer starts, it will resume consuming every partition at the last committed offset. This implements
 an **at least once guarantee**, so it is possible that you end up consuming the same message more than once.
 It's your responsibility to deal with this if that is a problem for you, e.g. by using idempotent operations.
 
@@ -33,6 +33,14 @@ consumer.each do |message|
   # process message
 end
 ```
+
+## Notes
+
+- It will spawn a manager thread and two threads per partition. However, your code
+  doesn't have to be thread-safe because every message is yielded to `each`
+  sequentially using a mutex.
+- On my Macbook Pro, I can consume around ~10000 messages per second from a
+  topic with 64 partitions on a production Kafka cluster.
 
 ## Contributing
 
