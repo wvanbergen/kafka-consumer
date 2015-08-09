@@ -3,8 +3,7 @@ require 'thor'
 
 module Kazoo
   class CLI < Thor
-    class_option :zookeeper, :type => :string, :default => ENV['ZOOKEEPER_PEERS']
-    class_option :chroot, :type => :string, :default => ""
+    class_option :zookeeper, :type => :string, :default => ENV['ZOOKEEPER']
 
     desc "cluster", "Describes the Kafka cluster as registered in Zookeeper"
     def cluster
@@ -73,7 +72,7 @@ module Kazoo
     end
 
     def kafka_cluster
-      @kafka_cluster ||= Kazoo::Cluster.new(options[:zookeeper], chroot: options[:chroot])
+      @kafka_cluster ||= Kazoo::Cluster.new(options[:zookeeper])
     end
   end
 end

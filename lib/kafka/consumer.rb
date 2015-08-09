@@ -18,12 +18,12 @@ module Kafka
         :max_wait_ms, :initial_offset,
         :logger
 
-    def initialize(name, subscription, zookeeper: [], chroot: '', max_wait_ms: 200, initial_offset: :latest_offset, logger: nil)
+    def initialize(name, subscription, zookeeper: [], max_wait_ms: 200, initial_offset: :latest_offset, logger: nil)
       @name, @subscription = name, subscription
       @max_wait_ms, @initial_offset = max_wait_ms, initial_offset
       @logger = logger || Logger.new($stdout)
 
-      @cluster = Kazoo::Cluster.new(zookeeper, chroot: chroot)
+      @cluster = Kazoo::Cluster.new(zookeeper)
       @group = Kazoo::Consumergroup.new(@cluster, name)
       @group.create unless @group.exists?
 

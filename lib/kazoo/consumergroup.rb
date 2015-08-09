@@ -7,14 +7,14 @@ module Kazoo
     end
 
     def create
-      cluster.zk.create(path: cluster.node_with_chroot("/consumers/#{name}"))
-      cluster.zk.create(path: cluster.node_with_chroot("/consumers/#{name}/ids"))
-      cluster.zk.create(path: cluster.node_with_chroot("/consumers/#{name}/owners"))
-      cluster.zk.create(path: cluster.node_with_chroot("/consumers/#{name}/offsets"))
+      cluster.zk.create(path: "/consumers/#{name}")
+      cluster.zk.create(path: "/consumers/#{name}/ids")
+      cluster.zk.create(path: "/consumers/#{name}/owners")
+      cluster.zk.create(path: "/consumers/#{name}/offsets")
     end
 
     def exists?
-      stat = cluster.zk.stat(path: cluster.node_with_chroot("/consumers/#{name}"))
+      stat = cluster.zk.stat(path: "/consumers/#{name}")
       stat.fetch(:stat).exists?
     end
 
@@ -24,23 +24,19 @@ module Kazoo
     end
 
     def instances
-      instances = cluster.zk.get_children(path: cluster.node_with_chroot("/consumers/#{name}/ids"))
+      instances = cluster.zk.get_children(path: "/consumers/#{name}/ids")
       instances.fetch(:children).map { |id| Instance.new(self, id: id) }
     end
 
     def watch_instances(&block)
       cb = Zookeeper::Callbacks::WatcherCallback.create(&block)
-      result = cluster.zk.get_children(
-        path: cluster.node_with_chroot("/consumers/#{name}/ids"),
-        watcher: cb,
-      )
-
-      instances = result.fetch(:children).map { |id| Instance.new(self, id: id) }
+      result = cluster.zk.get_children(path: "/consumers/#{name}/ids", watcher: cb)
 
       if result.fetch(:rc) != Zookeeper::Constants::ZOK
         raise Kazoo::Error, "Failed to watch instances. Error code result[:rc]"
       end
 
+      instances = result.fetch(:children).map { |id| Instance.new(self, id: id) }
       [instances, cb]
     end
 
@@ -48,10 +44,7 @@ module Kazoo
     def watch_partition_claim(partition, &block)
       cb = Zookeeper::Callbacks::WatcherCallback.create(&block)
 
-      result = cluster.zk.get(
-        path:    cluster.node_with_chroot("/consumers/#{name}/owners/#{partition.topic.name}/#{partition.id}"),
-        watcher: cb
-      )
+      result = cluster.zk.get(path: "/consumers/#{name}/owners/#{partition.topic.name}/#{partition.id}", watcher: cb)
 
       case result.fetch(:rc)
       when Zookeeper::Constants::ZNONODE # Nobody is claiming this partition yet
@@ -64,7 +57,7 @@ module Kazoo
     end
 
     def retrieve_offset(partition)
-      result = cluster.zk.get(path: cluster.node_with_chroot("/consumers/#{name}/offsets/#{partition.topic.name}/#{partition.id}"))
+      result = cluster.zk.get(path: "/consumers/#{name}/offsets/#{partition.topic.name}/#{partition.id}")
       case result.fetch(:rc)
         when Zookeeper::Constants::ZOK;
           result.fetch(:data).to_i
@@ -76,23 +69,16 @@ module Kazoo
     end
 
     def commit_offset(partition, offset)
-      result = cluster.zk.set(
-        path: cluster.node_with_chroot("/consumers/#{name}/offsets/#{partition.topic.name}/#{partition.id}"),
-        data: (offset + 1).to_s
-      )
-
+      result = cluster.zk.set(path: "/consumers/#{name}/offsets/#{partition.topic.name}/#{partition.id}", data: (offset + 1).to_s)
       if result.fetch(:rc) == Zookeeper::Constants::ZNONODE
-        result = cluster.zk.create(path: cluster.node_with_chroot("/consumers/#{name}/offsets/#{partition.topic.name}"))
+        result = cluster.zk.create(path: "/consumers/#{name}/offsets/#{partition.topic.name}")
         case result.fetch(:rc)
           when Zookeeper::Constants::ZOK, Zookeeper::Constants::ZNODEEXISTS
         else
           raise Kazoo::Error, "Failed to commit offset #{offset} for partition #{partition.topic.name}/#{partition.id}. Error code: #{result.fetch(:rc)}"
         end
 
-        result = cluster.zk.create(
-          path: cluster.node_with_chroot("/consumers/#{name}/offsets/#{partition.topic.name}/#{partition.id}"),
-          data: (offset + 1).to_s
-        )
+        result = cluster.zk.create(path: "/consumers/#{name}/offsets/#{partition.topic.name}/#{partition.id}", data: (offset + 1).to_s)
       end
 
       if result.fetch(:rc) != Zookeeper::Constants::ZOK
@@ -101,19 +87,19 @@ module Kazoo
     end
 
     def reset_offsets
-      result = cluster.zk.get_children(path: cluster.node_with_chroot("/consumers/#{name}/offsets"))
+      result = cluster.zk.get_children(path: "/consumers/#{name}/offsets")
       raise Kazoo::Error unless result.fetch(:rc) == Zookeeper::Constants::ZOK
 
       result.fetch(:children).each do |topic|
-        result = cluster.zk.get_children(path: cluster.node_with_chroot("/consumers/#{name}/offsets/#{topic}"))
+        result = cluster.zk.get_children(path: "/consumers/#{name}/offsets/#{topic}")
         raise Kazoo::Error unless result.fetch(:rc) == Zookeeper::Constants::ZOK
 
         result.fetch(:children).each do |partition|
-          cluster.zk.delete(path: cluster.node_with_chroot("/consumers/#{name}/offsets/#{topic}/#{partition}"))
+          cluster.zk.delete(path: "/consumers/#{name}/offsets/#{topic}/#{partition}")
           raise Kazoo::Error unless result.fetch(:rc) == Zookeeper::Constants::ZOK
         end
 
-        cluster.zk.delete(path: cluster.node_with_chroot("/consumers/#{name}/offsets/#{topic}"))
+        cluster.zk.delete(path: "/consumers/#{name}/offsets/#{topic}")
         raise Kazoo::Error unless result.fetch(:rc) == Zookeeper::Constants::ZOK
       end
     end
@@ -146,13 +132,13 @@ module Kazoo
       end
 
       def registered?
-        stat = cluster.zk.stat(path: cluster.node_with_chroot("/consumers/#{group.name}/ids/#{id}"))
+        stat = cluster.zk.stat(path: "/consumers/#{group.name}/ids/#{id}")
         stat.fetch(:stat).exists?
       end
 
       def register(subscription)
         result = cluster.zk.create(
-          path: cluster.node_with_chroot("/consumers/#{group.name}/ids/#{id}"),
+          path: "/consumers/#{group.name}/ids/#{id}",
           ephemeral: true,
           data: JSON.generate({
             version: 1,
@@ -167,9 +153,9 @@ module Kazoo
         end
 
         subscription.each do |topic|
-          stat = cluster.zk.stat(path: cluster.node_with_chroot("/consumers/#{group.name}/owners/#{topic.name}"))
+          stat = cluster.zk.stat(path: "/consumers/#{group.name}/owners/#{topic.name}")
           unless stat.fetch(:stat).exists?
-            result = cluster.zk.create(path: cluster.node_with_chroot("/consumers/#{group.name}/owners/#{topic.name}"))
+            result = cluster.zk.create(path: "/consumers/#{group.name}/owners/#{topic.name}")
             if result.fetch(:rc) != Zookeeper::Constants::ZOK
               raise Kazoo::ConsumerInstanceRegistrationFailed, "Failed to register subscription of #{topic.name} for consumer group #{group.name}! Error code: #{result.fetch(:rc)}"
             end
@@ -178,12 +164,12 @@ module Kazoo
       end
 
       def deregister
-        cluster.zk.delete(path: cluster.node_with_chroot("/consumers/#{group.name}/ids/#{id}"))
+        cluster.zk.delete(path: "/consumers/#{group.name}/ids/#{id}")
       end
 
       def claim_partition(partition)
         result = cluster.zk.create(
-          path: cluster.node_with_chroot("/consumers/#{group.name}/owners/#{partition.topic.name}/#{partition.id}"),
+          path: "/consumers/#{group.name}/owners/#{partition.topic.name}/#{partition.id}",
           ephemeral: true,
           data: id,
         )
@@ -199,7 +185,7 @@ module Kazoo
       end
 
       def release_partition(partition)
-        result = cluster.zk.delete(path: cluster.node_with_chroot("/consumers/#{group.name}/owners/#{partition.topic.name}/#{partition.id}"))
+        result = cluster.zk.delete(path: "/consumers/#{group.name}/owners/#{partition.topic.name}/#{partition.id}")
         if result.fetch(:rc) != Zookeeper::Constants::ZOK
           raise Kazoo::Error, "Failed to release partition #{partition.topic.name}/#{partition.id}. Error code: #{result.fetch(:rc)}"
         end
