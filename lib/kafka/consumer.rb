@@ -88,7 +88,10 @@ module Kafka
         end
       end
 
-      @consumer_manager = manage_partition_consumers(handler)
+      @consumer_manager = Thread.new do
+        Thread.current.abort_on_exception = true
+        manage_partition_consumers(handler)
+      end
 
       wait
     end
@@ -110,65 +113,72 @@ module Kafka
     end
 
     def manage_partition_consumers(handler)
-      Thread.new do
-        Thread.current.abort_on_exception = true
+      logger.info "Registered for #{group.name} as #{instance.id}"
 
-        logger.info "Registered for #{group.name} as #{instance.id}"
+      @partition_consumers = {}
 
-        @partition_consumers = {}
+      until interrupted?
+        running_instances, change = group.watch_instances { continue }
+        logger.info "#{running_instances.length} instances have been registered: #{running_instances.map(&:id).join(', ')}."
 
-        until interrupted?
-          running_instances, change = group.watch_instances { continue }
-          logger.info "#{running_instances.length} instances have been registered: #{running_instances.map(&:id).join(', ')}."
+        # Distribute the partitions over the running instances. Afterwards, we can see
+        # what partitions are assigned to this particular instance. Because all instances
+        # run the same algorithm on the same sorted lists of instances and partitions,
+        # all instances should be in agreement of the distribtion.
+        distributed_partitions = self.class.distribute_partitions(running_instances, partitions)
+        my_partitions = distributed_partitions[@instance]
 
-          # Distribute the partitions over the running instances. Afterwards, we can see
-          # what partitions are assigned to this particular instance. Because all instances
-          # run the same algorithm on the same sorted lists of instances and partitions,
-          # all instances should be in agreement of the distribtion.
-          distributed_partitions = self.class.distribute_partitions(running_instances, partitions)
-          my_partitions = distributed_partitions[@instance]
+        logger.info "Claiming #{my_partitions.length} out of #{partitions.length} partitions."
 
-          logger.info "Claiming #{my_partitions.length} out of #{partitions.length} partitions."
+        # based onw hat partitions we should be consuming and the partitions
+        # that we already are consuming, figure out what partition consumers
+        # to stop and start
+        partitions_to_stop  = @partition_consumers.keys - my_partitions
+        partitions_to_start = my_partitions - @partition_consumers.keys
 
-          partition_to_stop  = @partition_consumers.keys - my_partitions
-          partition_to_start = my_partitions - @partition_consumers.keys
+        # Stop the partition consumers we should no longer be running in parallel
+        if partitions_to_stop.length > 0
+          logger.info "Stopping #{partitions_to_stop.length} out of #{@partition_consumers.length} partition consumers."
 
-          if partition_to_stop.length > 0
-            logger.info "Stopping #{partition_to_stop.length} out of #{@partition_consumers.length} partition consumers."
-
-            partition_to_stop.each do |partition|
-              partition_consumer = @partition_consumers.delete(partition)
-              partition_consumer.stop
-            end
+          threads = []
+          partitions_to_stop.each do |partition|
+            partition_consumer = @partition_consumers.delete(partition)
+            threads << Thread.new { partition_consumer.stop }
           end
+          threads.each(&:join)
+        end
 
-          if partition_to_start.length > 0
-            logger.info "Starting #{partition_to_start.length} new partition consumers."
+        # Start all the partition consumers we are missing.
+        if partitions_to_start.length > 0
+          logger.info "Starting #{partitions_to_start.length} new partition consumers."
 
-            partition_to_start.each do |partition|
-              @partition_consumers[partition] = PartitionConsumer.new(self, partition,
-                  max_wait_ms: max_wait_ms, initial_offset: initial_offset, handler: handler)
-            end
-          end
-
-          unless change.completed?
-            logger.debug "Suspended consumer manager thread."
-            Thread.stop
-            logger.debug "Consumer manager thread woke up..."
+          partitions_to_start.each do |partition|
+            @partition_consumers[partition] = PartitionConsumer.new(self, partition,
+                max_wait_ms: max_wait_ms, initial_offset: initial_offset, handler: handler)
           end
         end
 
-        logger.debug "Consumer interrupted."
-
-        @partition_consumers.each_value(&:stop)
-
-        # Deregister the instance. This should trigger
-        # a rebalance in all the remaining instances.
-        @instance.deregister
-        logger.debug "Consumer group instance #{instance.id} was deregistered"
-
-        cluster.close
+        unless change.completed?
+          logger.debug "Suspended consumer manager thread."
+          Thread.stop
+          logger.debug "Consumer manager thread woke up..."
+        end
       end
+
+      logger.debug "Consumer interrupted."
+
+      # Stop all running partition consumers
+      threads = []
+      @partition_consumers.each_value do |partition_consumer|
+        threads << Thread.new { partition_consumer.stop }
+      end
+      threads.each(&:join)
+
+      # Deregister the instance. This should trigger a rebalance in all the remaining instances.
+      @instance.deregister
+      logger.debug "Consumer group instance #{instance.id} was deregistered"
+
+      cluster.close
     end
   end
 end
