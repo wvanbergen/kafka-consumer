@@ -120,7 +120,7 @@ module Kafka
             consumer.logger.warn "Offset #{start_offset} is no longer available for #{partition.topic.name}/#{partition.id}!"
             case initial_offset
             when :earliest_offset, -2
-              consumer.logger.warn "Instead, start consuming #{partition.topic.name}/#{partition.id} at the earliest available offset instead."
+              consumer.logger.warn "Instead, start consuming #{partition.topic.name}/#{partition.id} at the earliest available offset."
             when :latest_offset, -1
               consumer.logger.warn "Instead, start onsuming #{partition.topic.name}/#{partition.id} for new messages only."
             end
