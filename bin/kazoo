@@ -1,0 +1,14 @@
+#!/usr/bin/env ruby
+$LOAD_PATH.unshift(File.expand_path('../../lib', __FILE__))
+require 'kazoo/cli'
+
+begin
+  ENV["THOR_DEBUG"] = "1"
+  Kazoo::CLI.start(ARGV)
+rescue Thor::UndefinedCommandError, Thor::UnknownArgumentError, Thor::AmbiguousCommandError, Thor::InvocationError => e
+  $stderr.puts(e.message)
+  exit(64)
+rescue Thor::Error => e
+  $stderr.puts(e.message)
+  exit(1)
+end
