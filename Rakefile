@@ -41,3 +41,5 @@ namespace :kafka do
     end
   end
 end
+
+task default: :test
