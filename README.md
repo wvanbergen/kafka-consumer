@@ -39,7 +39,7 @@ end
 - It will spawn a manager thread and two threads per partition. However, your code
   doesn't have to be thread-safe because every message is yielded to `each`
   sequentially using a mutex.
-- On my Macbook Pro, I can consume around ~10000 messages per second from a
+- On my Macbook Pro, I can consume around ~10,000 messages per second from a
   topic with 64 partitions on a production Kafka cluster.
 
 ## Contributing

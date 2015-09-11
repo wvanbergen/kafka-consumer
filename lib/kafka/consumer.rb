@@ -9,8 +9,6 @@ require "kafka/consumer/version"
 
 module Kafka
   class Consumer
-    BACKPRESSURE_MESSAGE_LIMIT = 1000
-
     include Enumerable
 
     attr_reader :subscription,
