@@ -30,16 +30,6 @@ namespace :kafka do
     puts
     puts "%d messages consumed in %0.3fs (%0.3f msg/s)" % [counter, duration, counter.to_f / duration]
   end
-
-  namespace :consumer do
-    task :reset do
-      zookeeper = ENV["ZOOKEEPER"] or raise "Specify the ZOOKEEPER connection string."
-      name      = ENV["NAME"]      or raise "Specify NAME to name the consumergroup."
-
-      consumer = Kafka::Consumer.new(name, [], zookeeper: zookeeper)
-      consumer.group.reset_offsets
-    end
-  end
 end
 
 task default: :test
