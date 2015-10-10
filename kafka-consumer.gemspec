@@ -24,5 +24,5 @@ Gem::Specification.new do |spec|
   spec.add_development_dependency "mocha", "~> 1.0"
 
   spec.add_runtime_dependency "poseidon", "~> 0.0.5"
-  spec.add_runtime_dependency "kazoo-ruby", "~> 0.1"
+  spec.add_runtime_dependency "kazoo-ruby", "~> 0.4"
 end

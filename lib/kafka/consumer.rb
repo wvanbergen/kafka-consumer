@@ -16,17 +16,19 @@ module Kafka
         :max_wait_ms, :initial_offset,
         :logger
 
-    def initialize(name, subscription, zookeeper: [], max_wait_ms: 200, initial_offset: :latest_offset, logger: nil)
-      @name, @subscription = name, subscription
+    def initialize(name, subscription, zookeeper: nil, max_wait_ms: 200, initial_offset: :latest_offset, logger: nil)
+      raise ArgumentError, "The consumer's name cannot be empty" if name.nil? || name.empty?
+      raise ArgumentError, "You have to specify a zookeeper connection string" if zookeeper.nil? || zookeeper.empty?
+
+      @name = name
       @max_wait_ms, @initial_offset = max_wait_ms, initial_offset
       @logger = logger || Logger.new($stdout)
 
       @cluster = Kazoo::Cluster.new(zookeeper)
       @group = Kazoo::Consumergroup.new(@cluster, name)
-      @group.create unless @group.exists?
 
-      @instance = @group.instantiate
-      @instance.register(topics)
+      @group.create unless @group.exists?
+      @instance = @group.instantiate(subscription: Kazoo::Subscription.build(subscription)).register
     end
 
     def name
@@ -37,15 +39,12 @@ module Kafka
       instance.id
     end
 
-    def topics
-      @topics ||= begin
-        topic_names = Array(subscription)
-        topic_names.map { |topic_name| cluster.topics.fetch(topic_name) }
-      end
+    def subscription
+      instance.subscription
     end
 
     def partitions
-      topics.flat_map(&:partitions).sort_by { |partition| [partition.leader.id, partition.topic.name, partition.id] }
+      subscription.partitions(@cluster).sort_by { |partition| [partition.leader.id, partition.topic.name, partition.id] }
     end
 
     def interrupt
@@ -81,9 +80,7 @@ module Kafka
       mutex = Mutex.new
 
       handler = lambda do |message|
-        mutex.synchronize do
-          block.call(message)
-        end
+        mutex.synchronize { block.call(message) }
       end
 
       @consumer_manager = Thread.new do
