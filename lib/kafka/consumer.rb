@@ -44,7 +44,7 @@ module Kafka
     end
 
     def partitions
-      subscription.partitions(@cluster).sort_by { |partition| [partition.leader.id, partition.topic.name, partition.id] }
+      subscription.partitions(@cluster).sort_by { |partition| [partition.preferred_leader.id, partition.topic.name, partition.id] }
     end
 
     def interrupt
