@@ -93,6 +93,10 @@ module Kafka
 
     def self.distribute_partitions(instances, partitions)
       return {} if instances.empty?
+      # sort the list of instance to make sure all instances
+      # get the same order when running distribution algorithm.
+      # Otherwise, distribution will probably conflict.
+      instances = instances.sort_by { |i| i.id }
       partitions_per_instance = partitions.length.to_f / instances.length.to_f
 
       partitions.group_by.with_index do |partition, index|
