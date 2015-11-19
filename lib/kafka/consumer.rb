@@ -111,6 +111,7 @@ module Kafka
       logger.info "Registered for #{group.name} as #{instance.id}"
 
       @partition_consumers = {}
+      @commit_mutex = Mutex.new
 
       until interrupted?
         running_instances, change = group.watch_instances { continue }
@@ -148,7 +149,7 @@ module Kafka
           logger.info "Starting #{partitions_to_start.length} new partition consumers."
 
           partitions_to_start.each do |partition|
-            @partition_consumers[partition] = PartitionConsumer.new(self, partition,
+            @partition_consumers[partition] = PartitionConsumer.new(self, partition, @commit_mutex,
                 max_wait_ms: max_wait_ms, initial_offset: initial_offset, handler: handler)
           end
         end

@@ -5,11 +5,9 @@ module Kafka
       attr_reader :consumer, :partition, :handler, :max_wait_ms, :initial_offset,
                   :commit_interval, :last_processed_offset, :last_committed_offset
 
-      def initialize(consumer, partition, handler: nil, max_wait_ms: 100, initial_offset: :latest_offset, commit_interval: 5.0)
-        @consumer, @partition, @handler = consumer, partition, handler
+      def initialize(consumer, partition, commit_mutex, handler: nil, max_wait_ms: 100, initial_offset: :latest_offset, commit_interval: 5.0)
+        @consumer, @partition, @commit_mutex, @handler = consumer, partition, commit_mutex, handler
         @initial_offset, @max_wait_ms, @commit_interval = initial_offset, max_wait_ms, commit_interval
-
-        @commit_mutex = Mutex.new
 
         @consumer_thread = Thread.new do
           Thread.current.abort_on_exception = true
