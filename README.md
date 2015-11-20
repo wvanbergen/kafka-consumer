@@ -27,7 +27,7 @@ topics    = ["access_log"]
 
 consumer = Kafka::Consumer.new(name, topics, zookeeper: zookeeper)
 
-Signal.trap("INT") { consumer.interrupt }
+Signal.trap("INT") { consumer.interrupt; exit }
 
 consumer.each do |message|
   # process message
