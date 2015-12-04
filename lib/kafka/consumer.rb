@@ -125,7 +125,7 @@ module Kafka
         # run the same algorithm on the same sorted lists of instances and partitions,
         # all instances should be in agreement of the distribtion.
         distributed_partitions = self.class.distribute_partitions(running_instances, partitions)
-        my_partitions = distributed_partitions[@instance]
+        my_partitions = distributed_partitions.fetch(@instance, [])
 
         logger.info "Claiming #{my_partitions.length} out of #{partitions.length} partitions."
 
