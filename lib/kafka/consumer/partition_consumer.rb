@@ -130,7 +130,7 @@ module Kafka
 
           ensure
             consumer.logger.debug "Stopping consumer for #{partition.topic.name}/#{partition.id}..."
-            pc.close
+            pc.close if pc
           end
 
 
