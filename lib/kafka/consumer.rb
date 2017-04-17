@@ -93,6 +93,10 @@ module Kafka
 
     def self.distribute_partitions(instances, partitions)
       return {} if instances.empty?
+      # sort the list of instance to make sure all instances
+      # get the same order when running distribution algorithm.
+      # Otherwise, distribution will probably conflict.
+      instances = instances.sort_by { |i| i.id }
       partitions_per_instance = partitions.length.to_f / instances.length.to_f
 
       partitions.group_by.with_index do |partition, index|
@@ -121,7 +125,7 @@ module Kafka
         # run the same algorithm on the same sorted lists of instances and partitions,
         # all instances should be in agreement of the distribtion.
         distributed_partitions = self.class.distribute_partitions(running_instances, partitions)
-        my_partitions = distributed_partitions[@instance]
+        my_partitions = distributed_partitions.fetch(@instance, [])
 
         logger.info "Claiming #{my_partitions.length} out of #{partitions.length} partitions."
 
